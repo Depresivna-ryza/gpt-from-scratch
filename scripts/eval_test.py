@@ -157,7 +157,7 @@ def main():
                         help="custom checkpoint directory path (overrides --model-tag)")
     parser.add_argument("--test-path", type=str, default="data/datasets/eval-input.tsv",
                         help="path to test .tsv file")
-    parser.add_argument("--output-path", type=str, default="data/datasets/eval_output.txt.output",
+    parser.add_argument("--output-path", type=str, default="data/datasets/eval_output.output",
                         help="path to write predictions (default: eval_output.txt)")
     parser.add_argument("--device-type", type=str, default="",
                         help="cuda|cpu|mps (empty = autodetect)")
