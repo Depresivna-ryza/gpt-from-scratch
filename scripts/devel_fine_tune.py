@@ -12,13 +12,13 @@ from typing import Any, Iterable
 
 import torch
 import torch.nn.functional as F
-from tqdm import tqdm
 
 from nanochat.checkpoint_manager import load_model
 from nanochat.common import autodetect_device_type, compute_cleanup, compute_init, get_base_dir
 
 
 LOGGER = logging.getLogger("pairwise_tuner")
+
 
 def to_jsonable(value: Any) -> Any:
     if value is None:
@@ -130,12 +130,6 @@ def normalize_token_ids(raw: Any) -> list[int] | None:
 
 
 def encode_sentence(tokenizer: Any, sentence: str) -> list[int]:
-    """
-    Encode a sentence using several compatibility fallbacks.
-
-    The NanoChat tokenizer usually accepts `prepend="<|bos|>"`.
-    Hugging Face tokenizers usually do not, so we try several safe variants.
-    """
     attempts: list[tuple[tuple[Any, ...], dict[str, Any]]] = [
         ((sentence,), {"prepend": "<|bos|>"}),
         ((sentence,), {"add_special_tokens": True}),
@@ -201,15 +195,15 @@ class TrainRunConfig:
     seed: int = 1337
     device_type: str = "auto"
 
-    output_dir: Path = field(
-        default_factory=lambda: Path(get_base_dir()) / "base_checkpoints" / "tuned"
+    save_dir: Path = field(
+        default_factory=lambda: Path(get_base_dir()) / "base_checkpoints" / "fine_tuned"
     )
 
     def __post_init__(self) -> None:
         self.train_pairs_path = Path(self.train_pairs_path)
         if self.test_pairs_path is not None:
             self.test_pairs_path = Path(self.test_pairs_path)
-        self.output_dir = Path(self.output_dir)
+        self.save_dir = Path(self.save_dir)
 
 
 @dataclass(slots=True)
@@ -259,9 +253,9 @@ def parse_args() -> TrainRunConfig:
         help="cuda, cpu, or auto.",
     )
     parser.add_argument(
-        "--output-dir",
+        "--save-dir",
         type=Path,
-        default=Path(get_base_dir()) / "base_checkpoints" / "tuned",
+        default=Path(get_base_dir()) / "base_checkpoints" / "fine_tuned",
     )
 
     ns = parser.parse_args()
@@ -281,7 +275,7 @@ def parse_args() -> TrainRunConfig:
         save_every=ns.save_every,
         seed=ns.seed,
         device_type=ns.device_type,
-        output_dir=ns.output_dir,
+        save_dir=ns.save_dir,
     )
 
 
@@ -379,7 +373,7 @@ def save_tokenizer(tokenizer: Any, output_dir: Path) -> None:
 class PairwisePreferenceTrainer:
     def __init__(self, cfg: TrainRunConfig) -> None:
         self.cfg = cfg
-        self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
+        self.cfg.save_dir.mkdir(parents=True, exist_ok=True)
 
         self.device_type = resolve_device_type(cfg.device_type)
         _ddp, _rank, _local_rank, world_size, device = compute_init(self.device_type)
@@ -411,7 +405,6 @@ class PairwisePreferenceTrainer:
         self._reshuffle()
 
         self.best_eval_acc = float("-inf")
-        self._write_run_metadata()
 
     def _load_data(self) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
         train_pairs = read_tsv_pairs(self.cfg.train_pairs_path)
@@ -503,33 +496,25 @@ class PairwisePreferenceTrainer:
         acc = total_correct / total_count if total_count else 0.0
         return avg_loss, acc
 
-    def checkpoint_metadata(self, step: int, label: str) -> dict[str, Any]:
+    def _checkpoint_meta(self, step: int, output_name: str) -> dict[str, Any]:
         model_config = getattr(self.backend.model, "config", None)
         if model_config is None:
             model_config = getattr(self.model, "config", None)
 
         meta = {
             "step": step,
-            "label": label,
             "source": self.cfg.source,
             "hf_path": self.cfg.hf_path,
             "model_tag": self.cfg.model_tag,
             "step_in": self.cfg.step,
-            "train_pairs_path": str(self.cfg.train_pairs_path),
+            "pairs_path": str(self.cfg.train_pairs_path),
             "test_pairs_path": str(self.cfg.test_pairs_path) if self.cfg.test_pairs_path else None,
             "test_fraction": self.cfg.test_fraction,
             "batch_size": self.cfg.batch_size,
             "lr": self.cfg.lr,
             "weight_decay": self.cfg.weight_decay,
-            "max_steps": self.cfg.max_steps,
-            "eval_every": self.cfg.eval_every,
-            "save_every": self.cfg.save_every,
-            "seed": self.cfg.seed,
-            "device_type": self.device_type,
             "model_kind": self.backend.kind,
-            "model_name": self.backend.name,
-            "config": to_jsonable(self.cfg),
-            "loader_meta": to_jsonable(self.backend.meta),
+            "user_config": to_jsonable(self.cfg),
         }
 
         if self.backend.kind != "hf" and model_config is not None:
@@ -537,39 +522,38 @@ class PairwisePreferenceTrainer:
 
         return meta
 
-    def save(self, step: int, label: str) -> Path:
-        out_dir = self.cfg.output_dir / label
-        out_dir.mkdir(parents=True, exist_ok=True)
+    def save(self, step: int) -> None:
+        """
+        Match the original script's checkpoint behavior exactly.
+
+        NanoChat:
+            save_dir/model_000123.pt
+            save_dir/meta_000123.json
+
+        HF:
+            save_dir/  (save_pretrained output)
+            save_dir/meta.json
+        """
+        output_dir = self.cfg.save_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         if self.backend.kind == "hf":
-            self.model.save_pretrained(out_dir)
-            save_tokenizer(self.backend.tokenizer, out_dir)
-        else:
-            torch.save(self.model.state_dict(), out_dir / "model.pt")
+            self.model.save_pretrained(output_dir)
+            save_tokenizer(self.backend.tokenizer, output_dir)
+            with (output_dir / "meta.json").open("w", encoding="utf-8") as f:
+                json.dump(self._checkpoint_meta(step, "hf"), f, indent=2, ensure_ascii=False)
+            return
 
-        with (out_dir / "meta.json").open("w", encoding="utf-8") as f:
-            json.dump(self.checkpoint_metadata(step, label), f, indent=2, ensure_ascii=False)
-
-        return out_dir
-
-    def _write_run_metadata(self) -> None:
-        run = {
-            "config": to_jsonable(self.cfg),
-            "model_name": self.backend.name,
-            "model_kind": self.backend.kind,
-            "train_size": len(self.train_pairs),
-            "eval_size": len(self.eval_pairs),
-            "device_type": self.device_type,
-            "runtime_device": str(self.runtime_device),
-        }
-        with (self.cfg.output_dir / "run.json").open("w", encoding="utf-8") as f:
-            json.dump(run, f, indent=2, ensure_ascii=False)
+        torch.save(self.model.state_dict(), output_dir / f"model_{step:06d}.pt")
+        with (output_dir / f"meta_{step:06d}.json").open("w", encoding="utf-8") as f:
+            json.dump(self._checkpoint_meta(step, f"model_{step:06d}"), f, indent=2, ensure_ascii=False)
 
     def train(self) -> None:
         LOGGER.info("Model: %s", self.backend.name)
         LOGGER.info("Train pairs: %d | Eval pairs: %d", len(self.train_pairs), len(self.eval_pairs))
 
-        for step in tqdm(range(1, self.cfg.max_steps + 1), desc="Training", unit="step"):
+        from tqdm import trange
+        for step in trange(1, self.cfg.max_steps + 1):
             batch = self._next_batch()
 
             self.optimizer.zero_grad(set_to_none=True)
@@ -595,15 +579,12 @@ class PairwisePreferenceTrainer:
                 )
                 if eval_acc > self.best_eval_acc:
                     self.best_eval_acc = eval_acc
-                    best_path = self.save(step, "best")
-                    LOGGER.info("Saved best checkpoint to %s", best_path)
+                    self.save(step)
 
             if step % self.cfg.save_every == 0:
-                step_path = self.save(step, f"step_{step:06d}")
-                LOGGER.info("Saved checkpoint to %s", step_path)
+                self.save(step)
 
-        final_path = self.save(self.cfg.max_steps, "final")
-        LOGGER.info("Saved final checkpoint to %s", final_path)
+        self.save(self.cfg.max_steps)
 
 
 def main() -> None:

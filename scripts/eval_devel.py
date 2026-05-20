@@ -27,7 +27,7 @@ from nanochat.tokenizer import get_tokenizer
 
 def find_latest_checkpoint(checkpoint_dir):
     """Find the latest model checkpoint in a directory by step number."""
-    checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "model_*.pt"))
+    checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "model*.pt"))
     if not checkpoint_files:
         raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
     last_step = int(max(os.path.basename(f).split("_")[-1].split(".")[0] for f in checkpoint_files))
@@ -80,6 +80,7 @@ def compute_sentence_log_prob(model, tokenizer, sentence, device):
     """
     # Tokenize with BOS token
     tokens = tokenizer(sentence, prepend="<|bos|>")
+    # tokens = tokenizer(sentence, prepend="<|bos|>", append="<|output_end|>")
     tokens = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)  # (1, T)
     
     # Forward pass
@@ -107,7 +108,7 @@ def main():
     parser.add_argument("--model-tag", type=str, default="d4", help="checkpoint tag (e.g. 'd6', 'd24')")
     parser.add_argument("--checkpoint-path", type=str, default=None, help="custom checkpoint directory path (overrides --model-tag)")
     # parser.add_argument("--devel-path", type=str, default="data/datasets/devel.tsv", help="path to devel.tsv.txt")
-    parser.add_argument("--devel-path", type=str, default="data/datasets/eval_val_split.tsv", help="path to devel.tsv.txt")
+    parser.add_argument("--devel-path", type=str, default="data/datasets/devel_val_split.tsv", help="path to devel.tsv.txt")
     parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
     parser.add_argument("--max-examples", type=int, default=-1, help="max examples to evaluate (-1 = all)")
     args = parser.parse_args()
@@ -143,6 +144,13 @@ def main():
     total = 0
     
     max_examples = len(lines) if args.max_examples == -1 else args.max_examples
+    
+    if args.max_examples != -1:
+        # shuffle lines
+        rng = torch.Generator()
+        rng.manual_seed(1337)
+        indices = torch.randperm(len(lines), generator=rng)[:max_examples].tolist()
+        lines = [lines[i] for i in indices]
     
     for line in tqdm(lines[:max_examples], desc="Evaluating"):
         line = line.strip()
