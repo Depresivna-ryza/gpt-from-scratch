@@ -26,11 +26,11 @@ The dataset is a mix of good sentences from devel.tsv and leipzig 1M news englis
 
 `base_train`: main training script, almost unchanged. Changed mainly hyperparameters of the model to reduce the model size.
 
-***After 10 minutes of training i've achieved 78% accuracy.***
+***After 10 minutes of training i've achieved 80% accuracy.***
 
 `devel_fine_tune`: my own fine tuning script on the pair of sentences from devel.tsv datasaet.
 
-***After another 10 minutes of training i've achieved 97% accuracy.***
+***After another 10 minutes of training i've achieved 99% accuracy.***
 
 ## Evaluation
 
