@@ -1,3 +1,15 @@
+# This is my fork of nanochat
+
+
+original repo https://github.com/karpathy/nanochat
+
+I've made changes so that I can train GPT-2 on my own dataset and added custom validation, evaluation, and finetune trainng
+
+
+
+original repo readme:
+
+
 # nanochat
 
 ![nanochat logo](dev/nanochat.png)
