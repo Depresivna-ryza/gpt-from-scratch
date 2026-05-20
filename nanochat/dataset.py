@@ -1,160 +1,235 @@
-"""
-The base/pretraining dataset is a set of parquet files.
-This file contains utilities for:
-- iterating over the parquet files and yielding documents from it
-- download the files on demand if they are not on disk
-
-For details of how the dataset was prepared, see `repackage_data_reference.py`.
-"""
 
 import os
-import argparse
-import time
-import requests
-import pyarrow.parquet as pq
-from multiprocessing import Pool
+import random
 
-from nanochat.common import get_base_dir
+LEIPZIG_URL_100K = "https://downloads.wortschatz-leipzig.de/corpora/eng_news_2025_100K.tar.gz"
+LEIPZIG_URL_1M = "https://downloads.wortschatz-leipzig.de/corpora/eng_news_2025_1M.tar.gz"
+DEVEL_URL = "https://is.muni.cz/el/fi/jaro2026/PV026/um/data/devel.tsv"
+EVAL_URL = "https://is.muni.cz/el/fi/jaro2026/PV026/um/data/eval-input.tsv"
 
-# -----------------------------------------------------------------------------
-# The specifics of the current pretraining dataset
 
-# The URL on the internet where the data is hosted and downloaded from on demand
-BASE_URL = "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/main"
-MAX_SHARD = 6542 # the last datashard is shard_06542.parquet
-index_to_filename = lambda index: f"shard_{index:05d}.parquet" # format of the filenames
-base_dir = get_base_dir()
-DATA_DIR = os.path.join(base_dir, "base_data_climbmix")
+DATA_DIR = "data/datasets"
+LEIPZIG_SENTENCES = "eng_news_2025_1M-sentences.txt"
+DEVEL_TSV = "devel.tsv"
+EVAL_TSV = "eval-input.tsv"
 
-# -----------------------------------------------------------------------------
-# These functions are useful utilities to other modules, can/should be imported
 
-def list_parquet_files(data_dir=None, warn_on_legacy=False):
-    """ Looks into a data dir and returns full paths to all parquet files. """
-    data_dir = DATA_DIR if data_dir is None else data_dir
+VAL_SPLIT = 0.05
+SHUFFLE_SEED = None
 
-    # Legacy-supporting code due to the upgrade from FinewebEdu-100B to ClimbMix-400B
-    # This code will eventually be deleted.
-    if not os.path.exists(data_dir):
-        if warn_on_legacy:
-            print()
-            print("=" * 80)
-            print("  WARNING: DATASET UPGRADE REQUIRED")
-            print("=" * 80)
-            print()
-            print(f"  Could not find: {data_dir}")
-            print()
-            print("  nanochat recently switched from FinewebEdu-100B to ClimbMix-400B.")
-            print("  Everyone who does `git pull` as of March 4, 2026 is expected to see this message.")
-            print("  To upgrade to the new ClimbMix-400B dataset, run these two commands:")
-            print()
-            print("    python -m nanochat.dataset -n 170     # download ~170 shards, enough for GPT-2, adjust as desired")
-            print("    python -m scripts.tok_train           # re-train tokenizer on new ClimbMix data")
-            print()
-            print("  For now, falling back to your old FinewebEdu-100B dataset...")
-            print("=" * 80)
-            print()
-        # attempt a fallback to the legacy data directory
-        data_dir = os.path.join(base_dir, "base_data")
+def download_datasets():
+    import requests
+    import tarfile
 
-    parquet_files = sorted([
-        f for f in os.listdir(data_dir)
-        if f.endswith('.parquet') and not f.endswith('.tmp')
-    ])
-    parquet_paths = [os.path.join(data_dir, f) for f in parquet_files]
-    return parquet_paths
+    # Download and extract Leipzig sentences
+    print(f"Downloading Leipzig sentences from {LEIPZIG_URL_1M}...")
+    response = requests.get(LEIPZIG_URL_1M, stream=True)
+    response.raise_for_status()
+    
+    with tarfile.open(fileobj=response.raw, mode="r|gz") as tar:
+        tar.extractall(path=DATA_DIR)
+        extracted_directory = os.path.join(DATA_DIR, "eng_news_2025_1M")
+        
+        if os.path.exists(extracted_directory):
+            for filename in os.listdir(extracted_directory):
+                if filename.endswith("-sentences.txt"):
+                    os.rename(os.path.join(extracted_directory, filename), os.path.join(DATA_DIR, LEIPZIG_SENTENCES))
+                    break
+        else:
+            raise FileNotFoundError(f"Expected extracted directory not found: {extracted_directory}")
+        
+        # remove the directory after extracting the needed file and also remove the files
+        if os.path.exists(extracted_directory):
+            for filename in os.listdir(extracted_directory):
+                os.remove(os.path.join(extracted_directory, filename))
+            os.rmdir(extracted_directory)
+        
+    print("Leipzig sentences downloaded and extracted successfully!")
 
-def parquets_iter_batched(split, start=0, step=1):
+
+    # Download devel.tsv
+    print(f"Downloading devel.tsv from {DEVEL_URL}...")
+    response = requests.get(DEVEL_URL)
+    response.raise_for_status()
+    with open(os.path.join(DATA_DIR, DEVEL_TSV), "wb") as f:
+        f.write(response.content)
+    print("devel.tsv downloaded successfully!")
+
+    # Download eval.tsv
+    print(f"Downloading eval.tsv from {EVAL_URL}...")
+    response = requests.get(EVAL_URL)
+    response.raise_for_status()
+    with open(os.path.join(DATA_DIR, EVAL_TSV), "wb") as f:
+        f.write(response.content)
+    print("eval.tsv downloaded successfully!")
+
+
+def create_directory_structure():
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
+        print(f"Created data directory at: {DATA_DIR}")
+    else:
+        print(f"Data directory already exists at: {DATA_DIR}")
+
+def prepare_training_data():
+    leipzig_full_path = os.path.join(DATA_DIR, LEIPZIG_SENTENCES)
+    devel_full_path = os.path.join(DATA_DIR, DEVEL_TSV)
+    eval_full_path = os.path.join(DATA_DIR, EVAL_TSV)
+    
+    if not os.path.exists(leipzig_full_path):
+        raise FileNotFoundError(f"Could not find Leipzig sentences file at: {leipzig_full_path}")
+    
+    print("Leipzig corpus detected successfully!")
+    
+    # Quick sanity check on the first line to see if it contains IDs
+    with open(leipzig_full_path, "r", encoding="utf-8") as f:
+        first_line = f.readline()
+        print(f"Sample raw line: {repr(first_line)}")
+        
+    if not os.path.exists(devel_full_path):
+        raise FileNotFoundError(f"Could not find devel.tsv file at: {devel_full_path}")
+    
+    print("Devel TSV file detected successfully!")
+
+    with open(devel_full_path, "r", encoding="utf-8") as f:
+        first_line = f.readline()
+        part1, part2 = first_line.strip().split("\t")
+        print(f"Sample raw line: {repr(first_line)}")
+        print(f"Sample part 1 (grammatical): {repr(part1)}")
+        print(f"Sample part 2 (ungrammatical): {repr(part2)}")
+        
+    if not os.path.exists(eval_full_path):
+        raise FileNotFoundError(f"Could not find eval.tsv file at: {eval_full_path}")
+    
+    print("Eval TSV file detected successfully!")
+    
+    with open(eval_full_path, "r", encoding="utf-8") as f:
+        first_line = f.readline()
+        part1, part2 = first_line.strip().split("\t")
+        print(f"Sample raw line: {repr(first_line)}")
+        print(f"Sample part 1 : {repr(part1)}")
+        print(f"Sample part 2 : {repr(part2)}")
+
+
+def _load_all_sentences():
     """
-    Iterate through the dataset, in batches of underlying row_groups for efficiency.
-    - split can be "train" or "val". the last parquet file will be val.
-    - start/step are useful for skipping rows in DDP. e.g. start=rank, step=world_size
+    Load and combine sentences from both source files with balanced weighting:
+      - Leipzig: tab-separated ID + sentence, take the sentence part
+      - devel.tsv: tab-separated correct + incorrect, take the correct (first) sentence
+ 
+    Devel sentences are oversampled (repeated + randomly drawn) to match the
+    Leipzig count so each source contributes ~50% of every batch.
+ 
+    Returns a shuffled list of all sentences.
     """
-    assert split in ["train", "val"], "split must be 'train' or 'val'"
-    parquet_paths = list_parquet_files()
-    parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
-    for filepath in parquet_paths:
-        pf = pq.ParquetFile(filepath)
-        for rg_idx in range(start, pf.num_row_groups, step):
-            rg = pf.read_row_group(rg_idx)
-            texts = rg.column('text').to_pylist()
-            yield texts
+    # Leipzig corpus
+    leipzig_full_path = os.path.join(DATA_DIR, LEIPZIG_SENTENCES)
+    if not os.path.exists(leipzig_full_path):
+        raise FileNotFoundError(f"Could not find Leipzig sentences file at: {leipzig_full_path}")
+    leipzig_sentences = []
+    with open(leipzig_full_path, "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split("\t")
+            sentence = parts[1] if len(parts) > 1 else parts[0]
+            if sentence:
+                leipzig_sentences.append(sentence)
+ 
+    # devel.tsv — grammatical (first-column) sentences only
+    devel_full_path = os.path.join(DATA_DIR, DEVEL_TSV)
+    if not os.path.exists(devel_full_path):
+        raise FileNotFoundError(f"Could not find devel.tsv file at: {devel_full_path}")
+    devel_sentences = []
+    with open(devel_full_path, "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split("\t")
+            if parts and parts[0]:
+                devel_sentences.append(parts[0])
+ 
+    # Oversample devel to match the Leipzig count so both sources are equally
+    # represented in the shuffled pool (~50% each per batch on average).
+    rng = random.Random(SHUFFLE_SEED)
+    target = len(leipzig_sentences)
+    # full_repeats, remainder = divmod(target, len(devel_sentences))
+    full_repeats = 15
+    devel_oversampled = devel_sentences * full_repeats
+ 
+    print(
+        f"Dataset sizes — Leipzig: {len(leipzig_sentences)}, "
+        f"Devel (raw): {len(devel_sentences)}, "
+        f"Devel (oversampled): {len(devel_oversampled)}"
+    )
+ 
+    combined = leipzig_sentences + devel_oversampled
+    rng.shuffle(combined)
+    return combined
 
-# -----------------------------------------------------------------------------
-def download_single_file(index):
-    """ Downloads a single file index, with some backoff """
 
-    # Construct the local filepath for this file and skip if it already exists
-    filename = index_to_filename(index)
-    filepath = os.path.join(DATA_DIR, filename)
-    if os.path.exists(filepath):
-        print(f"Skipping {filepath} (already exists)")
-        return True
-
-    # Construct the remote URL for this file
-    url = f"{BASE_URL}/{filename}"
-    print(f"Downloading {filename}...")
-
-    # Download with retries
-    max_attempts = 5
-    for attempt in range(1, max_attempts + 1):
-        try:
-            response = requests.get(url, stream=True, timeout=30)
-            response.raise_for_status()
-            # Write to temporary file first
-            temp_path = filepath + f".tmp"
-            with open(temp_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
-                    if chunk:
-                        f.write(chunk)
-            # Move temp file to final location
-            os.rename(temp_path, filepath)
-            print(f"Successfully downloaded {filename}")
-            return True
-
-        except (requests.RequestException, IOError) as e:
-            print(f"Attempt {attempt}/{max_attempts} failed for {filename}: {e}")
-            # Clean up any partial files
-            for path in [filepath + f".tmp", filepath]:
-                if os.path.exists(path):
-                    try:
-                        os.remove(path)
-                    except:
-                        pass
-            # Try a few times with exponential backoff: 2^attempt seconds
-            if attempt < max_attempts:
-                wait_time = 2 ** attempt
-                print(f"Waiting {wait_time} seconds before retry...")
-                time.sleep(wait_time)
-            else:
-                print(f"Failed to download {filename} after {max_attempts} attempts")
-                return False
-
-    return False
+def parquets_iter_batched(split, batch_size=128):
+    """
+    Iterate over sentences in batches for the given split.
+ 
+    Both Leipzig and devel.tsv sentences are merged into a single pool,
+    shuffled with a fixed seed, then split into train / val by VAL_SPLIT.
+ 
+    Args:
+        split: "train" or "val"
+        batch_size: number of sentences per yielded batch
+    """
+    all_sentences = _load_all_sentences()
+ 
+    split_idx = int(len(all_sentences) * (1 - VAL_SPLIT))
+    if split == "train":
+        sentences = all_sentences[:split_idx]
+    elif split == "val":
+        sentences = all_sentences[split_idx:]
+    else:
+        raise ValueError(f"Unknown split '{split}'. Expected 'train' or 'val'.")
+ 
+    for i in range(0, len(sentences), batch_size):
+        yield sentences[i : i + batch_size]
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Download pretraining dataset shards")
-    parser.add_argument("-n", "--num-files", type=int, default=-1, help="Number of train shards to download (default: -1), -1 = disable")
-    parser.add_argument("-w", "--num-workers", type=int, default=4, help="Number of parallel download workers (default: 4)")
-    args = parser.parse_args()
+    # for split in ["train", "val"]:
+    #     print(f"Testing {split} split:")
+    #     for batch in parquets_iter_batched(split):
+    #         print(f"Batch of {len(batch)} sentences, sample: {repr(batch[0])}")
+    #         break
+    
+    create_directory_structure()
+    download_datasets()
+    prepare_training_data()
 
-    # Prepare the output directory
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-    # The way this works is that the user specifies the number of train shards to download via the -n flag.
-    # In addition to that, the validation shard is *always* downloaded and is pinned to be the last shard.
-    num_train_shards = MAX_SHARD if args.num_files == -1 else min(args.num_files, MAX_SHARD)
-    ids_to_download = list(range(num_train_shards))
-    ids_to_download.append(MAX_SHARD) # always download the validation shard
-
-    # Download the shards
-    print(f"Downloading {len(ids_to_download)} shards using {args.num_workers} workers...")
-    print(f"Target directory: {DATA_DIR}")
-    print()
-    with Pool(processes=args.num_workers) as pool:
-        results = pool.map(download_single_file, ids_to_download)
-
-    # Report results
-    successful = sum(1 for success in results if success)
-    print(f"Done! Downloaded: {successful}/{len(ids_to_download)} shards to {DATA_DIR}")
+    # Load raw sentences to build a lookup set for devel
+    devel_sentences_raw = set()
+    with open(os.path.join(DATA_DIR, DEVEL_TSV), "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split("\t")
+            if parts and parts[0]:
+                devel_sentences_raw.add(parts[0])
+ 
+    CHECK_BATCHES = 20
+    total_seen = devel_seen = 0
+ 
+    print(f"\nChecking first {CHECK_BATCHES} train batches for devel representation...")
+    for i, batch in enumerate(parquets_iter_batched("train")):
+        if i >= CHECK_BATCHES:
+            break
+        for s in batch:
+            print(s)
+            total_seen += 1
+            if s in devel_sentences_raw:
+                devel_seen += 1
+ 
+    leipzig_seen = total_seen - devel_seen
+    print(f"Sentences inspected : {total_seen}")
+    print(f"  From Leipzig       : {leipzig_seen} ({100 * leipzig_seen / total_seen:.1f}%)")
+    print(f"  From devel         : {devel_seen}   ({100 * devel_seen / total_seen:.1f}%)")
+ 
+    # Also show val split size
+    val_sentences = list(s for batch in parquets_iter_batched("val") for s in batch)
+    print(f"\nVal split size: {len(val_sentences)} sentences")
+    print(f"Sample val sentence: {repr(val_sentences[0])}")
+    
+    
+    
