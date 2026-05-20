@@ -7,6 +7,38 @@ I've made changes so that I can train GPT-2 on my own dataset and added custom v
 
 
 
+# Notable files used and modified from nanochat:
+
+## Dataset
+
+`nanochat.dataset`: I've redone this completely to load my own dataset.
+
+
+The dataset is a mix of good sentences from devel.tsv and leipzig 1M news english dataset 
+
+`scripts.devel_test_train`: this splits devel.tsv into test and train sets
+
+## Tokenizer
+
+`scripts.tok_train` and `scripts.tok_eval`: remain almost unchanged, changed mainly hyperparameters to downscale tokenizer
+
+## Training
+
+`base_train`: main training script, almost unchanged. Changed mainly hyperparameters of the model to reduce the model size.
+
+***After 10 minutes of training i've achieved 78% accuracy.***
+
+`devel_fine_tune`: my own fine tuning script on the pair of sentences from devel.tsv datasaet.
+
+***After another 10 minutes of training i've achieved 97% accuracy.***
+
+## Evaluation
+
+`eval_devel`, `eval_test`: my evaluation scripts
+
+
+
+
 original repo readme:
 
 
