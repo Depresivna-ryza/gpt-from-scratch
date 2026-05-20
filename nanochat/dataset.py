@@ -71,7 +71,7 @@ def create_directory_structure():
     else:
         print(f"Data directory already exists at: {DATA_DIR}")
 
-def prepare_training_data():
+def validate_training_data():
     leipzig_full_path = os.path.join(DATA_DIR, LEIPZIG_SENTENCES)
     devel_full_path = os.path.join(DATA_DIR, DEVEL_TSV)
     eval_full_path = os.path.join(DATA_DIR, EVAL_TSV)
@@ -198,7 +198,7 @@ if __name__ == "__main__":
     
     create_directory_structure()
     download_datasets()
-    prepare_training_data()
+    validate_training_data()
 
     # Load raw sentences to build a lookup set for devel
     devel_sentences_raw = set()
